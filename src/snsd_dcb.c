@@ -58,14 +58,27 @@ struct snsd_nl_msg {
     int len;
 };
 
+/* Netlink socket recv timeout (seconds) */
+#define SNSD_NL_RECV_TIMEOUT    5
+
 static int snsd_nl_open(void)
 {
     int fd;
     struct sockaddr_nl addr;
+    struct timeval tv;
 
     fd = socket(AF_NETLINK, SOCK_RAW, NETLINK_ROUTE);
     if (fd < 0) {
         SNSD_PRINT(SNSD_ERR, "Failed to open netlink socket: %s", strerror(errno));
+        return -errno;
+    }
+
+    /* Set recv timeout to prevent indefinite blocking */
+    tv.tv_sec = SNSD_NL_RECV_TIMEOUT;
+    tv.tv_usec = 0;
+    if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0) {
+        SNSD_PRINT(SNSD_ERR, "Failed to set recv timeout: %s", strerror(errno));
+        close(fd);
         return -errno;
     }
 
@@ -128,11 +141,18 @@ static void snsd_dcb_msg_init(struct snsd_nl_msg *msg, int type, int cmd,
     nlh->nlmsg_len = msg->len;
 }
 
-/* Add a nested attribute start marker, returns offset for nesting */
+/* Add a nested attribute start marker, returns offset for nesting.
+ * Returns negative errno on buffer overflow.
+ */
 static int snsd_dcb_nest_start(struct snsd_nl_msg *msg, int type)
 {
     struct nlattr *nla;
     int offset = msg->len;
+
+    if (msg->len + NLA_HDRLEN > SNSD_NL_BUF_SIZE) {
+        SNSD_PRINT(SNSD_ERR, "Netlink msg buffer overflow in nest_start");
+        return -ENOSPC;
+    }
 
     nla = (struct nlattr *)(msg->buf + msg->len);
     nla->nla_len = NLA_HDRLEN;  /* will be updated by nest_end */
@@ -153,21 +173,30 @@ static void snsd_dcb_nest_end(struct snsd_nl_msg *msg, int offset)
     ((struct nlmsghdr *)msg->buf)->nlmsg_len = msg->len;
 }
 
-/* Add a raw data attribute */
-static void snsd_dcb_add_attr(struct snsd_nl_msg *msg, int type,
-                              const void *data, int data_len)
+/* Add a raw data attribute.
+ * Returns 0 on success, negative errno on buffer overflow.
+ */
+static int snsd_dcb_add_attr(struct snsd_nl_msg *msg, int type,
+                             const void *data, int data_len)
 {
     struct nlattr *nla;
+    int total = NLA_ALIGN(NLA_HDRLEN + data_len);
+
+    if (msg->len + total > SNSD_NL_BUF_SIZE) {
+        SNSD_PRINT(SNSD_ERR, "Netlink msg buffer overflow in add_attr");
+        return -ENOSPC;
+    }
 
     nla = (struct nlattr *)(msg->buf + msg->len);
     nla->nla_len = NLA_HDRLEN + data_len;
     nla->nla_type = type;
     if (data && data_len > 0)
         memcpy((char *)nla + NLA_HDRLEN, data, data_len);
-    msg->len += NLA_ALIGN(nla->nla_len);
+    msg->len += total;
 
     /* update nlmsghdr length */
     ((struct nlmsghdr *)msg->buf)->nlmsg_len = msg->len;
+    return 0;
 }
 
 /* Send netlink message and receive response.
@@ -191,6 +220,10 @@ static int snsd_dcb_send_recv(int fd, struct snsd_nl_msg *msg,
     if (ret < 0) {
         SNSD_PRINT(SNSD_ERR, "DCB netlink recv failed: %s", strerror(errno));
         return -errno;
+    }
+    if (ret == 0) {
+        SNSD_PRINT(SNSD_ERR, "DCB netlink recv: connection closed");
+        return -ECONNRESET;
     }
 
     *resp_len = ret;
@@ -283,10 +316,19 @@ int snsd_dcb_get_ieee_pfc(const char *ifname, uint8_t *pfc_en)
         return -ENODATA;
     }
 
-    /* struct ieee_pfc: pfc_cap(u8), pfc_en(u8), mbc(u8), delay(u16), ... */
+    /* Extract pfc_en from struct ieee_pfc payload */
     {
-        const uint8_t *pfc_data = (const uint8_t *)pfc_attr + NLA_HDRLEN;
-        *pfc_en = pfc_data[1]; /* pfc_en is the second byte */
+        int payload_len = pfc_attr->nla_len - NLA_HDRLEN;
+
+        if (payload_len < (int)sizeof(struct ieee_pfc)) {
+            SNSD_PRINT(SNSD_ERR, "PFC attr too short (%d < %zu) for %s",
+                       payload_len, sizeof(struct ieee_pfc), ifname);
+            return -ENODATA;
+        }
+
+        const struct ieee_pfc *pfc =
+            (const struct ieee_pfc *)((char *)pfc_attr + NLA_HDRLEN);
+        *pfc_en = pfc->pfc_en;
     }
 
     return 0;
@@ -315,7 +357,11 @@ int snsd_dcb_set_ieee_pfc(const char *ifname, uint8_t pfc_en)
 
     /* Add nested: DCB_ATTR_IEEE -> DCB_ATTR_IEEE_PFC */
     ieee_offset = snsd_dcb_nest_start(&msg, DCB_ATTR_IEEE);
-    snsd_dcb_add_attr(&msg, DCB_ATTR_IEEE_PFC, &pfc, sizeof(pfc));
+    if (ieee_offset < 0 ||
+        snsd_dcb_add_attr(&msg, DCB_ATTR_IEEE_PFC, &pfc, sizeof(pfc)) != 0) {
+        snsd_nl_close(fd);
+        return -ENOSPC;
+    }
     snsd_dcb_nest_end(&msg, ieee_offset);
 
     ret = snsd_dcb_send_recv(fd, &msg, resp, &resp_len);
@@ -478,7 +524,11 @@ static int snsd_trust_netlink_set_dscp(const char *ifname)
 
         ieee_offset = snsd_dcb_nest_start(&msg, DCB_ATTR_IEEE);
         app_table_offset = snsd_dcb_nest_start(&msg, DCB_ATTR_IEEE_APP_TABLE);
-        snsd_dcb_add_attr(&msg, DCB_ATTR_IEEE_APP, &app, sizeof(app));
+        if (ieee_offset < 0 || app_table_offset < 0 ||
+            snsd_dcb_add_attr(&msg, DCB_ATTR_IEEE_APP, &app, sizeof(app)) != 0) {
+            snsd_nl_close(fd);
+            return -ENOSPC;
+        }
         snsd_dcb_nest_end(&msg, app_table_offset);
         snsd_dcb_nest_end(&msg, ieee_offset);
 
@@ -571,8 +621,11 @@ static int snsd_trust_netlink_set_pcp(const char *ifname)
                     ieee_off = snsd_dcb_nest_start(&del_msg, DCB_ATTR_IEEE);
                     table_off = snsd_dcb_nest_start(&del_msg,
                                                      DCB_ATTR_IEEE_APP_TABLE);
-                    snsd_dcb_add_attr(&del_msg, DCB_ATTR_IEEE_APP,
-                                      &del_app, sizeof(del_app));
+                    if (ieee_off < 0 || table_off < 0 ||
+                        snsd_dcb_add_attr(&del_msg, DCB_ATTR_IEEE_APP,
+                                          &del_app, sizeof(del_app)) != 0) {
+                        continue; /* skip this entry on overflow */
+                    }
                     snsd_dcb_nest_end(&del_msg, table_off);
                     snsd_dcb_nest_end(&del_msg, ieee_off);
 
@@ -701,18 +754,29 @@ int snsd_dcb_set_egress_qos_map(const char *vlan_ifname,
     snsd_rtnl_msg_init(&msg, RTM_NEWLINK, ifindex);
 
     linkinfo_off = snsd_dcb_nest_start(&msg, IFLA_LINKINFO);
-    snsd_dcb_add_attr(&msg, IFLA_INFO_KIND, "vlan", 5); /* "vlan\0" */
+    if (linkinfo_off < 0 ||
+        snsd_dcb_add_attr(&msg, IFLA_INFO_KIND, "vlan", 5) != 0) {
+        snsd_nl_close(fd);
+        return -ENOSPC;
+    }
 
     data_off = snsd_dcb_nest_start(&msg, IFLA_INFO_DATA);
     egress_off = snsd_dcb_nest_start(&msg, IFLA_VLAN_EGRESS_QOS);
+    if (data_off < 0 || egress_off < 0) {
+        snsd_nl_close(fd);
+        return -ENOSPC;
+    }
 
     for (i = 0; i < count; i++) {
         struct ifla_vlan_qos_mapping qos;
 
         qos.from = (__u32)maps[i].from;
         qos.to = (__u32)maps[i].to;
-        snsd_dcb_add_attr(&msg, IFLA_VLAN_QOS_MAPPING,
-                          &qos, sizeof(qos));
+        if (snsd_dcb_add_attr(&msg, IFLA_VLAN_QOS_MAPPING,
+                              &qos, sizeof(qos)) != 0) {
+            snsd_nl_close(fd);
+            return -ENOSPC;
+        }
     }
 
     snsd_dcb_nest_end(&msg, egress_off);
@@ -766,8 +830,12 @@ int snsd_dcb_get_egress_qos_map(const char *vlan_ifname,
     /* Add IFLA_EXT_MASK to get VLAN details */
     {
         __u32 ext_mask = 1; /* RTEXT_FILTER_VF */
-        snsd_dcb_add_attr(&msg, IFLA_EXT_MASK,
-                          &ext_mask, sizeof(ext_mask));
+        if (snsd_dcb_add_attr(&msg, IFLA_EXT_MASK,
+                              &ext_mask, sizeof(ext_mask)) != 0) {
+            snsd_nl_close(fd);
+            *count = 0;
+            return -ENOSPC;
+        }
     }
 
     ret = snsd_dcb_send_recv(fd, &msg, resp_buf, &resp_len);

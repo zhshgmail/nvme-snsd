@@ -1242,6 +1242,23 @@ int snsd_cfg_init(void)
         return -EPERM;
     }
 
+    /* Validate and clamp qos_check_interval */
+    if (base_cfg.qos_check_interval != 0) {
+        if (base_cfg.qos_check_interval < SNSD_QOS_CHECK_INTERVAL_MIN) {
+            SNSD_PRINT(SNSD_INFO,
+                       "qos-check-interval %d too small, clamped to %d",
+                       base_cfg.qos_check_interval,
+                       SNSD_QOS_CHECK_INTERVAL_MIN);
+            base_cfg.qos_check_interval = SNSD_QOS_CHECK_INTERVAL_MIN;
+        } else if (base_cfg.qos_check_interval > SNSD_QOS_CHECK_INTERVAL_MAX) {
+            SNSD_PRINT(SNSD_INFO,
+                       "qos-check-interval %d too large, clamped to %d",
+                       base_cfg.qos_check_interval,
+                       SNSD_QOS_CHECK_INTERVAL_MAX);
+            base_cfg.qos_check_interval = SNSD_QOS_CHECK_INTERVAL_MAX;
+        }
+    }
+
     /* parse [NETWORK] section for QoS config */
     if (snsd_network_init() != 0) {
         snsd_cfg_free_space();
