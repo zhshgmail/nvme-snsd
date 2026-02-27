@@ -651,7 +651,7 @@ static void snsd_rtnl_msg_init(struct snsd_nl_msg *msg, int type,
 
     nlh = (struct nlmsghdr *)msg->buf;
     nlh->nlmsg_type = type;
-    nlh->nlmsg_flags = NLM_F_REQUEST;
+    nlh->nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK;
     nlh->nlmsg_seq = 1;
     nlh->nlmsg_pid = 0;
 
