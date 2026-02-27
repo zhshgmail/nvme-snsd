@@ -130,6 +130,13 @@ main()
    - 远程验证：ens64f0.100 VLAN 口 egress 0:3,1:3 下发和漂移检测均通过
    - 调试修复：需 `NLM_F_ACK` 避免 recv 阻塞；需 `RTM_NEWLINK`（非 RTM_SETLINK）使内核处理 `IFLA_LINKINFO`
 
+3. **[R1-R4] 专家评审阻塞项** — ✅ 全部修复并通过硬件验证
+   - R1: `snsd_dcb_add_attr()`/`snsd_dcb_nest_start()` 增加 `SNSD_NL_BUF_SIZE` 边界检查
+   - R2: netlink socket 增加 `SO_RCVTIMEO` 5 秒超时，`recv()==0` 返回 `-ECONNRESET`
+   - R3: `--qos-check-interval` 增加 [5, 3600] 范围校验（clamp）
+   - R4: PFC 读取改用 `struct ieee_pfc` 指针 + payload 长度校验
+   - 集成验证：PFC 下发/漂移修复（使用新 struct ieee_pfc 读取路径）、Trust、Egress 全部通过
+
 ### 5.2 短期
 
 3. **Trust 漂移检测测试**
@@ -177,16 +184,16 @@ main()
 ## 7. 代码审查结果（Gemini + Codex 双专家审查）
 
 两位独立专家对全部代码、测试和需求进行了审查，结论为 **条件性 GO（Conditional GO）**。
-架构设计优秀，核心功能已通过硬件验证。以下为发现的问题及处理计划。
+架构设计优秀，核心功能已通过硬件验证。4 项 PR 阻塞项已全部修复并通过集成验证。
 
 ### 7.1 合入前必修项（PR 阻塞项，两位专家共识）
 
 | # | 问题 | 涉及文件 | 状态 |
 |---|------|----------|------|
-| R1 | `snsd_dcb_add_attr()` / `snsd_dcb_nest_start()` 缓冲区写入无边界检查，可能溢出栈上的 4096 字节缓冲区 | `src/snsd_dcb.c:132-171` | 待修复 |
-| R2 | netlink `recv()` 无超时保护，异常情况下可能永久阻塞守护进程主线程 | `src/snsd_dcb.c:66,190` | 待修复 |
-| R3 | `--qos-check-interval` 无范围校验 [5, 3600]，用户可配置负数或超大值 | `src/snsd_cfg.c` | 待修复 |
-| R4 | PFC 读取使用硬编码字节偏移 `pfc_data[1]`，应改用 `struct ieee_pfc` 结构体指针 | `src/snsd_dcb.c:288-289` | 待修复 |
+| R1 | `snsd_dcb_add_attr()` / `snsd_dcb_nest_start()` 缓冲区写入无边界检查，可能溢出栈上的 4096 字节缓冲区 | `src/snsd_dcb.c` | **已修复** — 两函数均增加 `SNSD_NL_BUF_SIZE` 边界检查并返回 `-ENOSPC`，所有调用点已更新 |
+| R2 | netlink `recv()` 无超时保护，异常情况下可能永久阻塞守护进程主线程 | `src/snsd_dcb.c` | **已修复** — `snsd_nl_open()` 新增 `SO_RCVTIMEO` 5 秒超时；`recv()==0` 返回 `-ECONNRESET` |
+| R3 | `--qos-check-interval` 无范围校验 [5, 3600]，用户可配置负数或超大值 | `src/snsd_cfg.c` | **已修复** — `snsd_cfg_init()` 中新增 clamp 逻辑，值 0 表示禁用 |
+| R4 | PFC 读取使用硬编码字节偏移 `pfc_data[1]`，应改用 `struct ieee_pfc` 结构体指针 | `src/snsd_dcb.c` | **已修复** — 改用 `const struct ieee_pfc *` 指针并校验 payload 长度 |
 
 ### 7.2 合入后优先修复项（P1）
 
@@ -194,7 +201,7 @@ main()
 |---|------|------|
 | P1-1 | DSCP trust 设置需 64 次独立 netlink 往返，效率低且非原子 | 考虑批量发送 |
 | P1-2 | 嵌套属性缺少 `NLA_F_NESTED` 标志位 | 新版内核（5.2+）strict validation 可能拒绝 |
-| P1-3 | `recv()` 返回 0 时未处理 | 对端关闭导致未初始化缓冲区读取 |
+| P1-3 | ~~`recv()` 返回 0 时未处理~~ | **已在 R2 中修复** — 返回 `-ECONNRESET` |
 | P1-4 | 多接口配置同一物理口时无冲突检测 | 后配置覆盖前配置，无警告 |
 | P1-5 | 漂移修复粒度粗：任一项漂移都重新下发全部三项 | 分别追踪 pfc/trust/egress drift |
 
