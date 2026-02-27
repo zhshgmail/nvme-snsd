@@ -73,7 +73,7 @@
 - **Trust 模式**：优先尝试 sysfs (`/sys/class/net/<dev>/qos/trust`)，不存在时回退到 netlink APP 表操作：
   - 设置 DSCP 信任：写入 64 条 APP 表项（selector=5, dscp 0~63 → 对应优先级）
   - 设置 PCP 信任：通过 `DCB_CMD_IEEE_DEL` 删除所有 selector=5 的表项
-- **Egress QoS Map**：通过 `ip link set` 命令设置 VLAN 出口映射；读取通过 `/proc/net/vlan/<dev>`
+- **Egress QoS Map**：通过 `RTM_NEWLINK` + `IFLA_LINKINFO` / `IFLA_INFO_DATA` / `IFLA_VLAN_EGRESS_QOS` netlink 设置；通过 `RTM_GETLINK` 解析嵌套 `IFLA_VLAN_QOS_MAPPING` 属性读取
 
 ### 3.4 守护进程生命周期集成
 
@@ -174,7 +174,40 @@ main()
 
 已在 ens64f0.100 VLAN 接口上验证 egress 0:3,1:3 下发和漂移检测。
 
-## 7. 已知限制
+## 7. 代码审查结果（Gemini + Codex 双专家审查）
+
+两位独立专家对全部代码、测试和需求进行了审查，结论为 **条件性 GO（Conditional GO）**。
+架构设计优秀，核心功能已通过硬件验证。以下为发现的问题及处理计划。
+
+### 7.1 合入前必修项（PR 阻塞项，两位专家共识）
+
+| # | 问题 | 涉及文件 | 状态 |
+|---|------|----------|------|
+| R1 | `snsd_dcb_add_attr()` / `snsd_dcb_nest_start()` 缓冲区写入无边界检查，可能溢出栈上的 4096 字节缓冲区 | `src/snsd_dcb.c:132-171` | 待修复 |
+| R2 | netlink `recv()` 无超时保护，异常情况下可能永久阻塞守护进程主线程 | `src/snsd_dcb.c:66,190` | 待修复 |
+| R3 | `--qos-check-interval` 无范围校验 [5, 3600]，用户可配置负数或超大值 | `src/snsd_cfg.c` | 待修复 |
+| R4 | PFC 读取使用硬编码字节偏移 `pfc_data[1]`，应改用 `struct ieee_pfc` 结构体指针 | `src/snsd_dcb.c:288-289` | 待修复 |
+
+### 7.2 合入后优先修复项（P1）
+
+| # | 问题 | 说明 |
+|---|------|------|
+| P1-1 | DSCP trust 设置需 64 次独立 netlink 往返，效率低且非原子 | 考虑批量发送 |
+| P1-2 | 嵌套属性缺少 `NLA_F_NESTED` 标志位 | 新版内核（5.2+）strict validation 可能拒绝 |
+| P1-3 | `recv()` 返回 0 时未处理 | 对端关闭导致未初始化缓冲区读取 |
+| P1-4 | 多接口配置同一物理口时无冲突检测 | 后配置覆盖前配置，无警告 |
+| P1-5 | 漂移修复粒度粗：任一项漂移都重新下发全部三项 | 分别追踪 pfc/trust/egress drift |
+
+### 7.3 低优先级改进项
+
+| # | 问题 |
+|---|------|
+| L1 | netlink socket 未设置 `SOCK_CLOEXEC` |
+| L2 | `IFLA_EXT_MASK` 值为 `RTEXT_FILTER_VF` 但实际不需要（不影响正确性） |
+| L3 | 特性文档 3.3 节 Egress 描述未同步更新为 netlink 实现 |
+| L4 | UT 缺少 PFC/Egress/Trust 解析边界测试和漂移检测 mock 验证 |
+
+## 8. 已知限制
 
 1. 配置文件路径硬编码为 `/etc/nvme/snsd.conf`，不支持自定义路径
 2. Trust 模式设置在无 sysfs 的环境下依赖 netlink APP 表，写入 64 条 DSCP 映射项，可能在某些驱动实现上有兼容性差异
