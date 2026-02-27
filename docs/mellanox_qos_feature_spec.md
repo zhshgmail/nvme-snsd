@@ -101,45 +101,41 @@ main()
 | Trust 模式切换 | 从 pcp 切换为 dscp，通过 `mlnx_qos -i ens64f0` 确认 dscp2prio 映射生效 | **通过** |
 | Trust sysfs 回退 | 服务器无 `/sys/class/net/ens64f0/qos/trust`，自动回退 netlink APP 表 | **通过** |
 | PFC 漂移检测 | 手动用 `mlnx_qos` 清零 PFC，守护进程在巡检周期后自动恢复 priority 3 | **通过** |
-| 配置解析 | 单接口 [NETWORK] 段解析成功，syslog 显示正确的配置参数 | **通过** |
+| 配置解析（=分隔） | `--trust = dscp` 格式解析成功 | **通过** |
+| 配置解析（空格分隔） | `--trust dscp` 格式（原始需求格式）解析成功 | **通过** |
+| VLAN Egress QoS (netlink) | 创建 ens64f0.100 VLAN 口，通过 RTM_NEWLINK 下发 0:3,1:3 映射，`/proc/net/vlan/` 确认生效 | **通过** |
+| Egress 漂移检测 | 手动清除 egress 映射（0:0 1:0），守护进程自动恢复为 0:3 1:3 | **通过** |
 | 守护进程集成 | 启动时下发、运行中巡检、退出时清理，全流程正常 | **通过** |
 
 ### 4.3 未验证的功能
 
 | 功能 | 未验证原因 | 风险评估 |
 |------|------------|----------|
-| VLAN 出口 QoS 映射 (egress-qos-map) | 远程服务器上无 VLAN 子接口 | **中等** — 代码路径使用 `ip link set` 命令，逻辑简单但未经实际验证 |
 | 多接口配置 | 仅测试了单接口配置 | **低** — 多接口是循环遍历，逻辑与单接口一致 |
-| Egress 漂移检测 | 依赖 VLAN 接口存在 | **中等** — 读取 `/proc/net/vlan/<dev>` 解析逻辑未验证 |
 | Trust 漂移检测 | 未单独测试 trust 被外部修改后的自动恢复 | **低** — 与 PFC 漂移检测逻辑一致 |
+| Egress netlink GET | RTM_GETLINK 读取 egress 映射用于漂移检测，当前巡检路径验证了 GET 能正确读到非零映射 | **低** |
 | 单元测试构建运行 | 远程服务器未安装 gtest/mockcpp | **低** — UT 框架已有成熟模式 |
 
 ## 5. 下一步计划
 
-### 5.1 待修复（对标原始需求）
+### 5.1 已修复（对标原始需求）
 
-1. **[P0] 修复配置解析器兼容空格分隔格式**
-   - 修改 `snsd_network_parse_field()` 支持 `--trust dscp`（无 `=`）和 `--trust = dscp`（有 `=`）两种格式
-   - 涉及文件：`src/snsd_network.c`
-   - 验证：使用原始需求中的配置格式进行解析测试
+1. **[P0] 配置解析器兼容空格分隔格式** — ✅ 已修复并验证
+   - `snsd_network_split_field()` 先尝试 `=`，回退空格分隔
+   - 远程验证：`--trust dscp`（空格分隔）正确解析并下发
 
-2. **[P1] Egress QoS Map 改用纯 netlink 实现**
-   - 将 `snsd_dcb_set_egress_qos_map()` 从 `system("ip link set ...")` 改为 `RTM_SETLINK` + `IFLA_VLAN_EGRESS_QOS` netlink 实现
-   - 将 `snsd_dcb_get_egress_qos_map()` 从读取 `/proc/net/vlan/<dev>` 改为 `RTM_GETLINK` netlink 实现
-   - 涉及文件：`src/snsd_dcb.c`
-   - 验证：在远程服务器创建 VLAN 接口后测试下发和读取
+2. **[P1] Egress QoS Map 改用纯 netlink 实现** — ✅ 已修复并验证
+   - set: `RTM_NEWLINK` + `IFLA_LINKINFO` / `IFLA_INFO_DATA` / `IFLA_VLAN_EGRESS_QOS`
+   - get: `RTM_GETLINK` 解析嵌套 `IFLA_VLAN_QOS_MAPPING` 属性
+   - 远程验证：ens64f0.100 VLAN 口 egress 0:3,1:3 下发和漂移检测均通过
+   - 调试修复：需 `NLM_F_ACK` 避免 recv 阻塞；需 `RTM_NEWLINK`（非 RTM_SETLINK）使内核处理 `IFLA_LINKINFO`
 
-### 5.2 短期（需硬件环境）
+### 5.2 短期
 
-3. **VLAN 接口测试**
-   - 在远程服务器上创建 VLAN 子接口：`ip link add link ens64f0 name ens64f0.100 type vlan id 100`
-   - 使用原始需求格式配置：`--ifname = ens64f0.100 | --pfc = 0,0,0,1,0,0,0,0 | --trust dscp | --egress 0:3,1:3`
-   - 验证 egress-qos-map 下发和漂移检测
-
-4. **Trust 漂移检测测试**
+3. **Trust 漂移检测测试**
    - 手动通过 `mlnx_qos` 将 trust 切回 pcp，确认守护进程自动恢复为 dscp
 
-5. **多接口配置测试**
+4. **多接口配置测试**
    - 同时配置 ens64f0 和 ens64f1，验证并行下发
 
 ### 5.3 中期
@@ -158,34 +154,25 @@ main()
 9. **ETS 支持**：扩展 DCB 层支持 IEEE 802.1Qaz ETS（增强传输选择）配置
 10. **多厂商适配**：验证在非 Mellanox 网卡（如 Intel E810）上的兼容性
 
-## 6. 与原始需求的偏差（待修复）
+## 6. 与原始需求的偏差（已修复）
 
-对比原始需求文档，当前实现存在以下两处与需求不一致的问题：
+### 6.1 [P0] 配置格式解析 — ✅ 已修复
 
-### 6.1 [P0] 配置格式解析不兼容原始需求
+原始需求使用 `--trust dscp`（空格分隔），实现要求 `--trust = dscp`（等号分隔）。
 
-**原始需求格式：**
-```ini
---ifname = ens0.10 | --pfc = 0,0,0,1,0,0,0,0 | --trust dscp | --egress 0:3
-```
+**修复**（commit 314e258）：新增 `snsd_network_split_field()` 函数，先尝试 `=` 分隔，找不到时回退空格分隔。两种格式均已在硬件上验证通过。
 
-**当前实现要求：**
-```ini
---ifname = ens0.10 | --pfc = 0,0,0,1,0,0,0,0 | --trust = dscp | --egress = 0:3
-```
+### 6.2 [P1] Egress QoS Map netlink 实现 — ✅ 已修复
 
-**差异说明：** 原始需求中 `--trust dscp` 和 `--egress 0:3` 使用空格分隔键值，没有 `=` 号。当前实现（`snsd_network.c:198`）强制要求所有字段使用 `=` 分隔符，用户若按原始需求格式书写配置，`--trust dscp` 和 `--egress 0:3` 将解析失败。
+原始需求要求使用标准 netlink 接口，实现使用了 `system("ip link set ...")`。
 
-**修复方案：** 修改 `snsd_network_parse_field()` 函数，当找不到 `=` 时，回退到按空格分隔键值。同时兼容两种格式。
+**修复**（commit 314e258, ce135e1）：
+- set: `RTM_NEWLINK` + `IFLA_LINKINFO` / `IFLA_INFO_DATA` / `IFLA_VLAN_EGRESS_QOS` / `IFLA_VLAN_QOS_MAPPING`
+- get: `RTM_GETLINK` + 解析嵌套 VLAN 属性
+- 注意：必须用 `RTM_NEWLINK`（非 `RTM_SETLINK`），因为内核 `rtnl_setlink()` 不处理 `IFLA_LINKINFO`
+- 注意：必须设置 `NLM_F_ACK` 标志，否则 `recv()` 永久阻塞
 
-### 6.2 [P1] Egress QoS Map 未使用标准 netlink 接口
-
-**原始需求：**
-> Mellanox网卡QoS配置使用标准netlink接口
-
-**当前实现：** `snsd_dcb.c:669` 中 `snsd_dcb_set_egress_qos_map()` 通过 `system("ip link set dev ... type vlan egress-qos-map ...")` 调用外部命令。PFC 和 trust 均为纯 netlink 实现，唯独 egress 走了 shell 命令，与需求中"使用标准 netlink 接口"不一致。
-
-**修复方案：** 改用 `RTM_SETLINK` + `IFLA_LINKINFO` / `IFLA_INFO_DATA` / `IFLA_VLAN_EGRESS_QOS` 嵌套属性的纯 netlink 实现。同时将 `snsd_dcb_get_egress_qos_map()` 也改为 `RTM_GETLINK` netlink 实现，去掉对 `/proc/net/vlan/<dev>` 的文件解析依赖。
+已在 ens64f0.100 VLAN 接口上验证 egress 0:3,1:3 下发和漂移检测。
 
 ## 7. 已知限制
 
