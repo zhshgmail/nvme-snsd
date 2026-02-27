@@ -694,7 +694,11 @@ int snsd_dcb_set_egress_qos_map(const char *vlan_ifname,
      *       [IFLA_VLAN_EGRESS_QOS (nested)]
      *         [IFLA_VLAN_QOS_MAPPING {from, to}] * N
      */
-    snsd_rtnl_msg_init(&msg, RTM_SETLINK, ifindex);
+    /* RTM_NEWLINK (not RTM_SETLINK) is needed to modify VLAN attributes.
+     * In the kernel, only rtnl_newlink() processes IFLA_LINKINFO;
+     * rtnl_setlink() / do_setlink() silently ignores it.
+     */
+    snsd_rtnl_msg_init(&msg, RTM_NEWLINK, ifindex);
 
     linkinfo_off = snsd_dcb_nest_start(&msg, IFLA_LINKINFO);
     snsd_dcb_add_attr(&msg, IFLA_INFO_KIND, "vlan", 5); /* "vlan\0" */
