@@ -39,10 +39,6 @@
 /* Netlink message buffer size */
 #define SNSD_NL_BUF_SIZE    4096
 
-/* NLA alignment */
-#define NLA_ALIGN(len)      (((len) + 3) & ~3)
-#define NLA_HDRLEN          ((int)NLA_ALIGN(sizeof(struct nlattr)))
-
 /* DSCP default priority mapping: dscp / 8 gives priority 0-7 */
 #define SNSD_DSCP_TO_PRIO(dscp)     ((dscp) >> 3)
 
