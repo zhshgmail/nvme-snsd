@@ -259,3 +259,185 @@ TEST_F(snsd_network_ut, base_cfg_qos_interval)
         EXPECT_LE(bcfg->qos_check_interval, SNSD_QOS_CHECK_INTERVAL_MAX);
     }
 }
+
+/* ============ Config format parsing tests ============ */
+/* These tests write temporary configs to /etc/nvme/snsd.conf,
+ * call snsd_network_init(), and verify parsing succeeds/fails.
+ * Original config is saved and restored.
+ */
+
+#define SNSD_TEST_CFG_PATH  "/etc/nvme/snsd.conf"
+#define SNSD_TEST_CFG_BAK   "/etc/nvme/snsd.conf.ut_bak"
+
+static void save_config(void)
+{
+    (void)rename(SNSD_TEST_CFG_PATH, SNSD_TEST_CFG_BAK);
+}
+
+static void restore_config(void)
+{
+    (void)remove(SNSD_TEST_CFG_PATH);
+    (void)rename(SNSD_TEST_CFG_BAK, SNSD_TEST_CFG_PATH);
+}
+
+static void write_config(const char *content)
+{
+    FILE *fp = fopen(SNSD_TEST_CFG_PATH, "w");
+    ASSERT_NE((FILE *)NULL, fp);
+    fputs(content, fp);
+    fclose(fp);
+}
+
+/* Test: space-separated format (original requirement style) */
+TEST_F(snsd_network_ut, parse_space_separated_format)
+{
+    int ret;
+
+    save_config();
+    write_config(
+        "[BASE]\n"
+        "restrain-time = 0\n"
+        "[NETWORK]\n"
+        "--ifname = ens0.10 | --pfc = 0,0,0,1,0,0,0,0 | --trust dscp | --egress 0:3\n"
+    );
+
+    ret = snsd_network_init();
+    EXPECT_EQ(0, ret);
+    snsd_network_exit();
+    restore_config();
+}
+
+/* Test: equals-separated format (also supported) */
+TEST_F(snsd_network_ut, parse_equals_separated_format)
+{
+    int ret;
+
+    save_config();
+    write_config(
+        "[BASE]\n"
+        "restrain-time = 0\n"
+        "[NETWORK]\n"
+        "--ifname = ens0.10 | --pfc = 0,0,0,1,0,0,0,0 | --trust = dscp | --egress = 0:3\n"
+    );
+
+    ret = snsd_network_init();
+    EXPECT_EQ(0, ret);
+    snsd_network_exit();
+    restore_config();
+}
+
+/* Test: mixed format in same line (ifname with =, trust without =) */
+TEST_F(snsd_network_ut, parse_mixed_format)
+{
+    int ret;
+
+    save_config();
+    write_config(
+        "[BASE]\n"
+        "restrain-time = 0\n"
+        "[NETWORK]\n"
+        "--ifname = ens0.10 | --pfc = 0,0,0,1,0,0,0,0 | --trust dscp | --egress = 0:3,1:3\n"
+    );
+
+    ret = snsd_network_init();
+    EXPECT_EQ(0, ret);
+    snsd_network_exit();
+    restore_config();
+}
+
+/* Test: multiple interfaces in [NETWORK] */
+TEST_F(snsd_network_ut, parse_multi_interface)
+{
+    int ret;
+
+    save_config();
+    write_config(
+        "[BASE]\n"
+        "restrain-time = 0\n"
+        "[NETWORK]\n"
+        "--ifname = ens0.10 | --pfc = 0,0,0,1,0,0,0,0 | --trust dscp | --egress 0:3\n"
+        "--ifname = ens1.10 | --pfc = 0,0,0,1,0,0,0,0 | --trust dscp | --egress 0:3\n"
+    );
+
+    ret = snsd_network_init();
+    EXPECT_EQ(0, ret);
+    snsd_network_exit();
+    restore_config();
+}
+
+/* Test: trust=pcp requires VLAN interface */
+TEST_F(snsd_network_ut, parse_trust_pcp_requires_vlan)
+{
+    int ret;
+
+    save_config();
+    write_config(
+        "[BASE]\n"
+        "restrain-time = 0\n"
+        "[NETWORK]\n"
+        "--ifname = ens0 | --pfc = 0,0,0,1,0,0,0,0 | --trust pcp\n"
+    );
+
+    /* Should fail: trust=pcp on non-VLAN interface */
+    ret = snsd_network_init();
+    EXPECT_NE(0, ret);
+    snsd_network_exit();
+    restore_config();
+}
+
+/* Test: egress requires VLAN interface */
+TEST_F(snsd_network_ut, parse_egress_requires_vlan)
+{
+    int ret;
+
+    save_config();
+    write_config(
+        "[BASE]\n"
+        "restrain-time = 0\n"
+        "[NETWORK]\n"
+        "--ifname = ens0 | --egress 0:3\n"
+    );
+
+    /* Should fail: egress on non-VLAN interface */
+    ret = snsd_network_init();
+    EXPECT_NE(0, ret);
+    snsd_network_exit();
+    restore_config();
+}
+
+/* Test: no [NETWORK] section is OK */
+TEST_F(snsd_network_ut, parse_no_network_section)
+{
+    int ret;
+
+    save_config();
+    write_config(
+        "[BASE]\n"
+        "restrain-time = 0\n"
+    );
+
+    ret = snsd_network_init();
+    EXPECT_EQ(0, ret);
+    snsd_network_exit();
+    restore_config();
+}
+
+/* Test: missing ifname should fail */
+TEST_F(snsd_network_ut, parse_missing_ifname)
+{
+    int ret;
+
+    save_config();
+    write_config(
+        "[BASE]\n"
+        "restrain-time = 0\n"
+        "[NETWORK]\n"
+        "--pfc = 0,0,0,1,0,0,0,0 | --trust dscp\n"
+    );
+
+    /* Should fail: ifname is required */
+    ret = snsd_network_init();
+    EXPECT_NE(0, ret);
+    snsd_network_exit();
+    restore_config();
+}
