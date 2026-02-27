@@ -116,35 +116,79 @@ main()
 
 ## 5. 下一步计划
 
-### 5.1 短期（需硬件环境）
-1. **VLAN 接口测试**
+### 5.1 待修复（对标原始需求）
+
+1. **[P0] 修复配置解析器兼容空格分隔格式**
+   - 修改 `snsd_network_parse_field()` 支持 `--trust dscp`（无 `=`）和 `--trust = dscp`（有 `=`）两种格式
+   - 涉及文件：`src/snsd_network.c`
+   - 验证：使用原始需求中的配置格式进行解析测试
+
+2. **[P1] Egress QoS Map 改用纯 netlink 实现**
+   - 将 `snsd_dcb_set_egress_qos_map()` 从 `system("ip link set ...")` 改为 `RTM_SETLINK` + `IFLA_VLAN_EGRESS_QOS` netlink 实现
+   - 将 `snsd_dcb_get_egress_qos_map()` 从读取 `/proc/net/vlan/<dev>` 改为 `RTM_GETLINK` netlink 实现
+   - 涉及文件：`src/snsd_dcb.c`
+   - 验证：在远程服务器创建 VLAN 接口后测试下发和读取
+
+### 5.2 短期（需硬件环境）
+
+3. **VLAN 接口测试**
    - 在远程服务器上创建 VLAN 子接口：`ip link add link ens64f0 name ens64f0.100 type vlan id 100`
-   - 配置 `--ifname = ens64f0.100 | --pfc = 0,0,0,1,0,0,0,0 | --trust = dscp | --egress = 0:3,1:3`
+   - 使用原始需求格式配置：`--ifname = ens64f0.100 | --pfc = 0,0,0,1,0,0,0,0 | --trust dscp | --egress 0:3,1:3`
    - 验证 egress-qos-map 下发和漂移检测
 
-2. **Trust 漂移检测测试**
+4. **Trust 漂移检测测试**
    - 手动通过 `mlnx_qos` 将 trust 切回 pcp，确认守护进程自动恢复为 dscp
 
-3. **多接口配置测试**
+5. **多接口配置测试**
    - 同时配置 ens64f0 和 ens64f1，验证并行下发
 
-### 5.2 中期
-4. **单元测试构建验证**
+### 5.3 中期
+
+6. **单元测试构建验证**
    - 在远程服务器安装 gtest/mockcpp 依赖
    - 构建并运行 UT，确保 mock DCB 函数路径覆盖
 
-5. **错误恢复测试**
+7. **错误恢复测试**
    - 模拟 netlink 通信失败场景（如网口 down）
    - 验证错误日志输出和重试行为
 
-### 5.3 长期
-6. **配置热更新**：支持不重启守护进程的情况下重新加载 `[NETWORK]` 配置
-7. **ETS 支持**：扩展 DCB 层支持 IEEE 802.1Qaz ETS（增强传输选择）配置
-8. **多厂商适配**：验证在非 Mellanox 网卡（如 Intel E810）上的兼容性
+### 5.4 长期
 
-## 6. 已知限制
+8. **配置热更新**：支持不重启守护进程的情况下重新加载 `[NETWORK]` 配置
+9. **ETS 支持**：扩展 DCB 层支持 IEEE 802.1Qaz ETS（增强传输选择）配置
+10. **多厂商适配**：验证在非 Mellanox 网卡（如 Intel E810）上的兼容性
+
+## 6. 与原始需求的偏差（待修复）
+
+对比原始需求文档，当前实现存在以下两处与需求不一致的问题：
+
+### 6.1 [P0] 配置格式解析不兼容原始需求
+
+**原始需求格式：**
+```ini
+--ifname = ens0.10 | --pfc = 0,0,0,1,0,0,0,0 | --trust dscp | --egress 0:3
+```
+
+**当前实现要求：**
+```ini
+--ifname = ens0.10 | --pfc = 0,0,0,1,0,0,0,0 | --trust = dscp | --egress = 0:3
+```
+
+**差异说明：** 原始需求中 `--trust dscp` 和 `--egress 0:3` 使用空格分隔键值，没有 `=` 号。当前实现（`snsd_network.c:198`）强制要求所有字段使用 `=` 分隔符，用户若按原始需求格式书写配置，`--trust dscp` 和 `--egress 0:3` 将解析失败。
+
+**修复方案：** 修改 `snsd_network_parse_field()` 函数，当找不到 `=` 时，回退到按空格分隔键值。同时兼容两种格式。
+
+### 6.2 [P1] Egress QoS Map 未使用标准 netlink 接口
+
+**原始需求：**
+> Mellanox网卡QoS配置使用标准netlink接口
+
+**当前实现：** `snsd_dcb.c:669` 中 `snsd_dcb_set_egress_qos_map()` 通过 `system("ip link set dev ... type vlan egress-qos-map ...")` 调用外部命令。PFC 和 trust 均为纯 netlink 实现，唯独 egress 走了 shell 命令，与需求中"使用标准 netlink 接口"不一致。
+
+**修复方案：** 改用 `RTM_SETLINK` + `IFLA_LINKINFO` / `IFLA_INFO_DATA` / `IFLA_VLAN_EGRESS_QOS` 嵌套属性的纯 netlink 实现。同时将 `snsd_dcb_get_egress_qos_map()` 也改为 `RTM_GETLINK` netlink 实现，去掉对 `/proc/net/vlan/<dev>` 的文件解析依赖。
+
+## 7. 已知限制
 
 1. 配置文件路径硬编码为 `/etc/nvme/snsd.conf`，不支持自定义路径
 2. Trust 模式设置在无 sysfs 的环境下依赖 netlink APP 表，写入 64 条 DSCP 映射项，可能在某些驱动实现上有兼容性差异
-3. Egress QoS Map 设置通过 `system("ip link set ...")` 执行，非纯 netlink 实现
-4. 巡检周期精度受主循环 100ms tick 影响，实际周期可能有 ±100ms 偏差
+3. 巡检周期精度受主循环 100ms tick 影响，实际周期可能有 ±100ms 偏差
