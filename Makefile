@@ -28,7 +28,9 @@ OBJS := src/snsd_main.o		\
 		src/snsd_direct.o	\
 		src/snsd_connect.o	\
 		src/snsd_conn_peon.o \
-		src/snsd_conn_nvme.o
+		src/snsd_conn_nvme.o \
+		src/snsd_dcb.o		\
+		src/snsd_network.o
 
 LLDP_OBJS := src/snsd_reg.o		\
 		src/snsd_log.o		\

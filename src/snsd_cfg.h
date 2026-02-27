@@ -177,6 +177,7 @@ struct snsd_cfg_infos {
 
 struct snsd_base_cfg {
     int  restrain_time;                         /* The restrain time of disconnect device when net link down. Unit is second. */
+    int  qos_check_interval;                    /* QoS periodic check interval in seconds (default 30) */
     char trsvcid[SNSD_COMMON_LEN + 1];          /* transport service id (e.g. IP port) */
     char hostnqn[SNSD_NQN_MAX_LEN];             /* user-defined hostnqn */
     char hostid[SNSD_CFG_UUID_LEN];             /* user-defined hostid (if default not used) */
