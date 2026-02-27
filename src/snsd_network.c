@@ -181,30 +181,77 @@ static int snsd_network_parse_egress(const char *val,
 /* Parse a single key=value pair from a pipe-delimited field.
  * field: e.g., "--ifname = ens0.10" (already whitespace-normalized)
  */
+/* Split a field into key and value.
+ * Supports two formats:
+ *   "--key = value"   (with '=' separator)
+ *   "--key value"     (space-separated, no '=')
+ * The key is written to 'key_out', value to 'val_out'.
+ * Returns 0 on success, -EINVAL on failure.
+ */
+static int snsd_network_split_field(const char *field,
+                                    char *key_out, int key_size,
+                                    char *val_out, int val_size)
+{
+    char buf[SNSD_NETWORK_FIELD_MAX];
+    char *eq;
+    char *p;
+    char *vp;
+
+    snprintf(buf, sizeof(buf), "%s", field);
+
+    /* Try '=' separator first */
+    eq = strchr(buf, '=');
+    if (eq) {
+        *eq = '\0';
+        p = skip_space(buf);
+        trim_trailing(p);
+        snprintf(key_out, key_size, "%s", p);
+
+        vp = skip_space(eq + 1);
+        trim_trailing(vp);
+        snprintf(val_out, val_size, "%s", vp);
+        return 0;
+    }
+
+    /* Fallback: space-separated "--key value" */
+    p = skip_space(buf);
+    if (strncmp(p, "--", 2) != 0) {
+        SNSD_PRINT(SNSD_ERR, "Invalid field format: '%s'", field);
+        return -EINVAL;
+    }
+
+    /* Find first space after the key */
+    vp = p;
+    while (*vp && !isspace((unsigned char)*vp))
+        vp++;
+
+    if (*vp == '\0') {
+        SNSD_PRINT(SNSD_ERR, "No value found in field: '%s'", field);
+        return -EINVAL;
+    }
+
+    *vp = '\0';
+    trim_trailing(p);
+    snprintf(key_out, key_size, "%s", p);
+
+    vp = skip_space(vp + 1);
+    trim_trailing(vp);
+    snprintf(val_out, val_size, "%s", vp);
+    return 0;
+}
+
 static int snsd_network_parse_field(const char *field,
                                     struct snsd_network_cfg *cfg)
 {
     char key[SNSD_NETWORK_FIELD_MAX];
     char val[SNSD_NETWORK_FIELD_MAX];
-    char *eq;
     char *p;
+    int ret;
 
-    /* Copy to working buffer */
-    strncpy(key, field, sizeof(key) - 1);
-    key[sizeof(key) - 1] = '\0';
-
-    /* Find '=' separator */
-    eq = strchr(key, '=');
-    if (!eq) {
-        SNSD_PRINT(SNSD_ERR, "No '=' found in field: '%s'", field);
-        return -EINVAL;
-    }
-
-    *eq = '\0';
-    trim_trailing(key);
-    strncpy(val, skip_space(eq + 1), sizeof(val) - 1);
-    val[sizeof(val) - 1] = '\0';
-    trim_trailing(val);
+    ret = snsd_network_split_field(field, key, sizeof(key),
+                                   val, sizeof(val));
+    if (ret != 0)
+        return ret;
 
     /* Strip leading "--" from key if present */
     p = key;

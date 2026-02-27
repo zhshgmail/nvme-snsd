@@ -635,91 +635,202 @@ int snsd_dcb_set_trust(const char *ifname, enum snsd_trust_mode mode)
     return ret;
 }
 
-/* ============ Egress QoS map ============ */
+/* ============ Egress QoS map (netlink RTM_SETLINK/RTM_GETLINK) ============ */
+
+/* Initialize an RTM_SETLINK / RTM_GETLINK message with ifinfomsg header.
+ * This is different from DCB messages which use dcbmsg header.
+ */
+static void snsd_rtnl_msg_init(struct snsd_nl_msg *msg, int type,
+                                unsigned int ifindex)
+{
+    struct nlmsghdr *nlh;
+    struct ifinfomsg *ifi;
+
+    memset(msg->buf, 0, sizeof(msg->buf));
+    msg->len = 0;
+
+    nlh = (struct nlmsghdr *)msg->buf;
+    nlh->nlmsg_type = type;
+    nlh->nlmsg_flags = NLM_F_REQUEST;
+    nlh->nlmsg_seq = 1;
+    nlh->nlmsg_pid = 0;
+
+    ifi = (struct ifinfomsg *)NLMSG_DATA(nlh);
+    ifi->ifi_family = AF_UNSPEC;
+    ifi->ifi_index = ifindex;
+
+    msg->len = NLMSG_ALIGN(NLMSG_LENGTH(sizeof(struct ifinfomsg)));
+    nlh->nlmsg_len = msg->len;
+}
 
 int snsd_dcb_set_egress_qos_map(const char *vlan_ifname,
                                 const struct snsd_egress_map *maps, int count)
 {
-    char cmd[512];
-    int len;
-    int i;
+    struct snsd_nl_msg msg;
+    char resp_buf[SNSD_NL_BUF_SIZE];
+    int resp_len = sizeof(resp_buf);
+    unsigned int ifindex;
+    int linkinfo_off, data_off, egress_off;
+    int fd;
     int ret;
+    int i;
 
-    /* Use "ip link set" to configure VLAN egress-qos-map.
-     * This is consistent with standard Linux VLAN configuration
-     * and avoids the complexity of RTM_SETLINK with nested IFLA_VLAN attrs.
+    ifindex = if_nametoindex(vlan_ifname);
+    if (ifindex == 0) {
+        SNSD_PRINT(SNSD_ERR, "Interface %s not found: %s",
+                   vlan_ifname, strerror(errno));
+        return -ENODEV;
+    }
+
+    fd = snsd_nl_open();
+    if (fd < 0)
+        return fd;
+
+    /* Build RTM_SETLINK message:
+     * [nlmsghdr][ifinfomsg]
+     *   [IFLA_LINKINFO (nested)]
+     *     [IFLA_INFO_KIND = "vlan"]
+     *     [IFLA_INFO_DATA (nested)]
+     *       [IFLA_VLAN_EGRESS_QOS (nested)]
+     *         [IFLA_VLAN_QOS_MAPPING {from, to}] * N
      */
-    len = snprintf(cmd, sizeof(cmd),
-                   "ip link set dev %s type vlan egress-qos-map",
-                   vlan_ifname);
-    if (len < 0 || len >= (int)sizeof(cmd))
-        return -ENOMEM;
+    snsd_rtnl_msg_init(&msg, RTM_SETLINK, ifindex);
+
+    linkinfo_off = snsd_dcb_nest_start(&msg, IFLA_LINKINFO);
+    snsd_dcb_add_attr(&msg, IFLA_INFO_KIND, "vlan", 5); /* "vlan\0" */
+
+    data_off = snsd_dcb_nest_start(&msg, IFLA_INFO_DATA);
+    egress_off = snsd_dcb_nest_start(&msg, IFLA_VLAN_EGRESS_QOS);
 
     for (i = 0; i < count; i++) {
-        int remaining = sizeof(cmd) - len;
-        int written = snprintf(cmd + len, remaining, " %d:%d",
-                               maps[i].from, maps[i].to);
-        if (written < 0 || written >= remaining)
-            return -ENOMEM;
-        len += written;
+        struct ifla_vlan_qos_mapping qos;
+
+        qos.from = (__u32)maps[i].from;
+        qos.to = (__u32)maps[i].to;
+        snsd_dcb_add_attr(&msg, IFLA_VLAN_QOS_MAPPING,
+                          &qos, sizeof(qos));
     }
 
-    SNSD_PRINT(SNSD_INFO, "Setting egress-qos-map: %s", cmd);
+    snsd_dcb_nest_end(&msg, egress_off);
+    snsd_dcb_nest_end(&msg, data_off);
+    snsd_dcb_nest_end(&msg, linkinfo_off);
 
-    ret = system(cmd);
-    if (ret != 0) {
-        SNSD_PRINT(SNSD_ERR, "Failed to set egress-qos-map on %s, ret=%d",
-                   vlan_ifname, ret);
-        return -EIO;
+    ret = snsd_dcb_send_recv(fd, &msg, resp_buf, &resp_len);
+    snsd_nl_close(fd);
+
+    if (ret == 0) {
+        SNSD_PRINT(SNSD_INFO,
+                   "Egress-qos-map set on %s: %d mapping(s) via netlink",
+                   vlan_ifname, count);
     }
 
-    return 0;
+    return ret;
 }
 
 int snsd_dcb_get_egress_qos_map(const char *vlan_ifname,
                                 struct snsd_egress_map *maps, int *count)
 {
-    char path[PATH_MAX];
-    FILE *fp;
-    char line[256];
+    struct snsd_nl_msg msg;
+    char resp_buf[SNSD_NL_BUF_SIZE];
+    int resp_len = sizeof(resp_buf);
+    unsigned int ifindex;
+    int fd;
+    int ret;
     int found = 0;
+    struct nlmsghdr *nlh;
+    struct nlattr *linkinfo, *info_data, *egress_qos, *nla;
+    const char *attr_data;
+    int attr_len;
 
-    /* Read from /proc/net/vlan/<dev> */
-    snprintf(path, sizeof(path), "/proc/net/vlan/%s", vlan_ifname);
-
-    fp = fopen(path, "r");
-    if (!fp) {
-        SNSD_PRINT(SNSD_DBG, "Cannot open %s: %s", path, strerror(errno));
+    ifindex = if_nametoindex(vlan_ifname);
+    if (ifindex == 0) {
+        SNSD_PRINT(SNSD_DBG, "Interface %s not found: %s",
+                   vlan_ifname, strerror(errno));
         *count = 0;
-        return -errno;
+        return -ENODEV;
     }
 
-    /* Parse lines looking for "EGRESS priority mappings:" */
-    while (fgets(line, sizeof(line), fp) != NULL) {
-        char *p = strstr(line, "EGRESS priority mappings:");
-        if (p) {
-            /* Parse "FROM:TO" pairs after the label.
-             * Format: "EGRESS priority mappings: 0:3 1:3 "
-             * The mappings may continue on subsequent lines.
-             */
-            p += strlen("EGRESS priority mappings:");
-            while (p && found < SNSD_DCB_MAX_EGRESS_MAP) {
-                int from, to;
-                if (sscanf(p, " %d:%d", &from, &to) == 2) {
-                    maps[found].from = from;
-                    maps[found].to = to;
-                    found++;
-                    /* advance past this pair */
-                    p = strchr(p + 1, ' ');
-                } else {
-                    break;
-                }
-            }
+    fd = snsd_nl_open();
+    if (fd < 0)
+        return fd;
+
+    /* RTM_GETLINK to retrieve VLAN link info */
+    snsd_rtnl_msg_init(&msg, RTM_GETLINK, ifindex);
+
+    /* Request IFLA_LINKINFO in the filter mask */
+    ((struct nlmsghdr *)msg.buf)->nlmsg_flags |= NLM_F_REQUEST;
+    /* Add IFLA_EXT_MASK to get VLAN details */
+    {
+        __u32 ext_mask = 1; /* RTEXT_FILTER_VF */
+        snsd_dcb_add_attr(&msg, IFLA_EXT_MASK,
+                          &ext_mask, sizeof(ext_mask));
+    }
+
+    ret = snsd_dcb_send_recv(fd, &msg, resp_buf, &resp_len);
+    snsd_nl_close(fd);
+
+    if (ret != 0) {
+        *count = 0;
+        return ret;
+    }
+
+    /* Parse response: find IFLA_LINKINFO > IFLA_INFO_DATA > IFLA_VLAN_EGRESS_QOS */
+    nlh = (struct nlmsghdr *)resp_buf;
+    attr_data = (const char *)NLMSG_DATA(nlh) + NLMSG_ALIGN(sizeof(struct ifinfomsg));
+    attr_len = nlh->nlmsg_len - NLMSG_ALIGN(NLMSG_LENGTH(sizeof(struct ifinfomsg)));
+
+    linkinfo = snsd_nla_find(attr_data, attr_len, IFLA_LINKINFO);
+    if (!linkinfo) {
+        SNSD_PRINT(SNSD_DBG, "No IFLA_LINKINFO for %s", vlan_ifname);
+        *count = 0;
+        return 0;
+    }
+
+    /* Navigate into IFLA_LINKINFO nested attrs */
+    attr_data = (const char *)linkinfo + NLA_HDRLEN;
+    attr_len = linkinfo->nla_len - NLA_HDRLEN;
+
+    info_data = snsd_nla_find(attr_data, attr_len, IFLA_INFO_DATA);
+    if (!info_data) {
+        SNSD_PRINT(SNSD_DBG, "No IFLA_INFO_DATA for %s", vlan_ifname);
+        *count = 0;
+        return 0;
+    }
+
+    /* Navigate into IFLA_INFO_DATA nested attrs */
+    attr_data = (const char *)info_data + NLA_HDRLEN;
+    attr_len = info_data->nla_len - NLA_HDRLEN;
+
+    egress_qos = snsd_nla_find(attr_data, attr_len, IFLA_VLAN_EGRESS_QOS);
+    if (!egress_qos) {
+        SNSD_PRINT(SNSD_DBG, "No IFLA_VLAN_EGRESS_QOS for %s", vlan_ifname);
+        *count = 0;
+        return 0;
+    }
+
+    /* Parse IFLA_VLAN_QOS_MAPPING entries */
+    attr_data = (const char *)egress_qos + NLA_HDRLEN;
+    attr_len = egress_qos->nla_len - NLA_HDRLEN;
+
+    nla = (struct nlattr *)attr_data;
+    while (attr_len >= NLA_HDRLEN && found < SNSD_DCB_MAX_EGRESS_MAP) {
+        if (nla->nla_len < NLA_HDRLEN || nla->nla_len > attr_len)
             break;
+
+        if (nla->nla_type == IFLA_VLAN_QOS_MAPPING &&
+            nla->nla_len >= NLA_HDRLEN + (int)sizeof(struct ifla_vlan_qos_mapping)) {
+            struct ifla_vlan_qos_mapping *qos;
+
+            qos = (struct ifla_vlan_qos_mapping *)((char *)nla + NLA_HDRLEN);
+            maps[found].from = (int)qos->from;
+            maps[found].to = (int)qos->to;
+            found++;
         }
+
+        attr_len -= NLA_ALIGN(nla->nla_len);
+        nla = (struct nlattr *)((char *)nla + NLA_ALIGN(nla->nla_len));
     }
 
-    fclose(fp);
     *count = found;
     return 0;
 }
