@@ -36,6 +36,7 @@
 #include "snsd_reg.h"
 #include "snsd_switch.h"
 #include "snsd_direct.h"
+#include "snsd_network.h"
 
 struct usr_command {
     const char *cmd;
@@ -108,6 +109,8 @@ void port_handle(void)
 {
     bool quit;
     unsigned int poll_count = SWITCH_POLL_INTEVAL;
+    unsigned int qos_last_check = poll_count;
+    struct snsd_base_cfg *bcfg = snsd_get_base_info();
 
     LIST_HEAD(direct_port_list_head);
     LIST_HEAD(switch_port_list_head);
@@ -115,6 +118,14 @@ void port_handle(void)
     do {
         switch_port_handle(&switch_port_list_head, poll_count);
         direct_port_handle(&direct_port_list_head, poll_count);
+
+        /* Periodic QoS configuration check */
+        if (snsd_network_need_check(qos_last_check, poll_count,
+                                    bcfg->qos_check_interval)) {
+            snsd_network_check();
+            qos_last_check = poll_count;
+        }
+
         quit = snsd_help_run();
         usleep(POLL_INTERVAL_TIME);
 
@@ -148,6 +159,11 @@ int main(int argc, char *argv[])
     ret = snsd_cfg_init();
     if (ret != 0)
         return ret;
+
+    /* Apply initial QoS configuration */
+    ret = snsd_network_apply();
+    if (ret != 0)
+        SNSD_PRINT(SNSD_ERR, "Initial QoS apply failed (non-fatal): %d", ret);
 
     ret = peon_init();
     if (ret != 0) {

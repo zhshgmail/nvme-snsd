@@ -32,6 +32,7 @@
 #include "snsd_cfg.h"
 #include "snsd_connect.h"
 #include "snsd_conn_nvme.h"
+#include "snsd_network.h"
 
 static bool snsd_check_ip_validity(char *para_name, char *ip);
 static bool snsd_check_protocol_validity(char *para_name, char *val);
@@ -95,6 +96,7 @@ const struct snsd_cfg_commandline command_line_options[] = {
 /* base config file items */
 const struct snsd_cfg_commandline base_command_line_options[] = {
     {"--restrain-time",     SNSD_CFG_INT,    sizeof(int),             (void*)&base_cfg.restrain_time,     (void*)0,  NECESSARY_BUTT,     NECESSARY_BUTT,     NULL,                                  "restrain_time"},
+    {"--qos-check-interval", SNSD_CFG_INT,   sizeof(int),             (void*)&base_cfg.qos_check_interval, (void*)30, NECESSARY_BUTT,    NECESSARY_BUTT,     NULL,                                  "qos_check_interval"},
     {"--trsvcid",           SNSD_CFG_STRING, sizeof(cfg.trsvcid),     (void*)base_cfg.trsvcid,            "invalid", NECESSARY_OPTIONAL, NECESSARY_OPTIONAL, snsd_nvme_para_validity_test,          "trsvcid"},
     {"--hostnqn",           SNSD_CFG_STRING, sizeof(cfg.hostnqn),     (void*)base_cfg.hostnqn,            "invalid", NECESSARY_OPTIONAL, NECESSARY_OPTIONAL, snsd_check_base_hostnqn_validity,      "hostnqn"},
     {"--hostid",            SNSD_CFG_STRING, sizeof(cfg.hostid),      (void*)base_cfg.hostid,             "invalid", NECESSARY_OPTIONAL, NECESSARY_OPTIONAL, snsd_nvme_para_validity_test,          "hostid"},
@@ -1240,6 +1242,30 @@ int snsd_cfg_init(void)
         return -EPERM;
     }
 
+    /* Validate and clamp qos_check_interval */
+    if (base_cfg.qos_check_interval != 0) {
+        if (base_cfg.qos_check_interval < SNSD_QOS_CHECK_INTERVAL_MIN) {
+            SNSD_PRINT(SNSD_INFO,
+                       "qos-check-interval %d too small, clamped to %d",
+                       base_cfg.qos_check_interval,
+                       SNSD_QOS_CHECK_INTERVAL_MIN);
+            base_cfg.qos_check_interval = SNSD_QOS_CHECK_INTERVAL_MIN;
+        } else if (base_cfg.qos_check_interval > SNSD_QOS_CHECK_INTERVAL_MAX) {
+            SNSD_PRINT(SNSD_INFO,
+                       "qos-check-interval %d too large, clamped to %d",
+                       base_cfg.qos_check_interval,
+                       SNSD_QOS_CHECK_INTERVAL_MAX);
+            base_cfg.qos_check_interval = SNSD_QOS_CHECK_INTERVAL_MAX;
+        }
+    }
+
+    /* parse [NETWORK] section for QoS config */
+    if (snsd_network_init() != 0) {
+        snsd_cfg_free_space();
+        SNSD_PRINT(SNSD_ERR, "Network QoS init fail.");
+        return -EPERM;
+    }
+
     snsd_cfg_show();
     SNSD_PRINT(SNSD_INFO, "Config init end.");
     return 0;
@@ -1247,6 +1273,7 @@ int snsd_cfg_init(void)
 
 void snsd_cfg_exit(void)
 {
+    snsd_network_exit();
     snsd_cfg_free_space();
     pthread_mutex_destroy(&(sw_info_list.lock));
     pthread_mutex_destroy(&(dc_info_list.lock));
