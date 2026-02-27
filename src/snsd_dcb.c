@@ -277,7 +277,7 @@ int snsd_dcb_get_ieee_pfc(const char *ifname, uint8_t *pfc_en)
     struct snsd_nl_msg msg;
     char resp[SNSD_NL_BUF_SIZE];
     int resp_len = sizeof(resp);
-    struct nlmsghdr *nlh;
+    const struct nlmsghdr *nlh;
     struct nlattr *ieee_attr, *pfc_attr;
     const char *attrs_start;
     int attrs_len;
@@ -296,7 +296,7 @@ int snsd_dcb_get_ieee_pfc(const char *ifname, uint8_t *pfc_en)
         return ret;
 
     /* Parse response: skip nlmsghdr + dcbmsg, then find DCB_ATTR_IEEE */
-    nlh = (struct nlmsghdr *)resp;
+    nlh = (const struct nlmsghdr *)resp;
     attrs_start = resp + NLMSG_ALIGN(NLMSG_LENGTH(sizeof(struct dcbmsg)));
     attrs_len = nlh->nlmsg_len - NLMSG_ALIGN(NLMSG_LENGTH(sizeof(struct dcbmsg)));
 
@@ -395,8 +395,8 @@ static int snsd_trust_sysfs_get(const char *ifname, enum snsd_trust_mode *trust)
         return -EIO;
 
     buf[ret] = '\0';
-    /* Remove trailing newline */
-    if (ret > 0 && buf[ret - 1] == '\n')
+    /* Remove trailing newline (ret is always > 0 here) */
+    if (buf[ret - 1] == '\n')
         buf[ret - 1] = '\0';
 
     if (strcmp(buf, "dscp") == 0)
@@ -432,8 +432,9 @@ static int snsd_trust_netlink_get(const char *ifname, enum snsd_trust_mode *trus
     struct snsd_nl_msg msg;
     char resp[SNSD_NL_BUF_SIZE];
     int resp_len = sizeof(resp);
-    struct nlmsghdr *nlh;
-    struct nlattr *ieee_attr, *app_table_attr;
+    const struct nlmsghdr *nlh;
+    struct nlattr *ieee_attr;
+    const struct nlattr *app_table_attr;
     const char *attrs_start;
     int attrs_len;
     int fd;
@@ -451,7 +452,7 @@ static int snsd_trust_netlink_get(const char *ifname, enum snsd_trust_mode *trus
     if (ret != 0)
         return ret;
 
-    nlh = (struct nlmsghdr *)resp;
+    nlh = (const struct nlmsghdr *)resp;
     attrs_start = resp + NLMSG_ALIGN(NLMSG_LENGTH(sizeof(struct dcbmsg)));
     attrs_len = nlh->nlmsg_len - NLMSG_ALIGN(NLMSG_LENGTH(sizeof(struct dcbmsg)));
 
@@ -483,7 +484,8 @@ static int snsd_trust_netlink_get(const char *ifname, enum snsd_trust_mode *trus
                 break;
 
             if (app_nla->nla_len >= NLA_HDRLEN + (int)sizeof(struct dcb_app)) {
-                struct dcb_app *app = (struct dcb_app *)(p + NLA_HDRLEN);
+                const struct dcb_app *app =
+                    (const struct dcb_app *)(p + NLA_HDRLEN);
                 if (app->selector == IEEE_8021QAZ_APP_SEL_DSCP)
                     dscp_count++;
             }
@@ -551,8 +553,9 @@ static int snsd_trust_netlink_set_pcp(const char *ifname)
     struct snsd_nl_msg get_msg;
     char resp[SNSD_NL_BUF_SIZE];
     int resp_len = sizeof(resp);
-    struct nlmsghdr *nlh;
-    struct nlattr *ieee_attr, *app_table_attr;
+    const struct nlmsghdr *nlh;
+    struct nlattr *ieee_attr;
+    const struct nlattr *app_table_attr;
     const char *attrs_start;
     int attrs_len;
     int fd;
@@ -571,7 +574,7 @@ static int snsd_trust_netlink_set_pcp(const char *ifname)
         return ret;
     }
 
-    nlh = (struct nlmsghdr *)resp;
+    nlh = (const struct nlmsghdr *)resp;
     attrs_start = resp + NLMSG_ALIGN(NLMSG_LENGTH(sizeof(struct dcbmsg)));
     attrs_len = nlh->nlmsg_len - NLMSG_ALIGN(NLMSG_LENGTH(sizeof(struct dcbmsg)));
 
@@ -602,7 +605,8 @@ static int snsd_trust_netlink_set_pcp(const char *ifname)
                 break;
 
             if (app_nla->nla_len >= NLA_HDRLEN + (int)sizeof(struct dcb_app)) {
-                struct dcb_app *app = (struct dcb_app *)(p + NLA_HDRLEN);
+                const struct dcb_app *app =
+                    (const struct dcb_app *)(p + NLA_HDRLEN);
 
                 if (app->selector == IEEE_8021QAZ_APP_SEL_DSCP) {
                     struct snsd_nl_msg del_msg;
@@ -805,8 +809,8 @@ int snsd_dcb_get_egress_qos_map(const char *vlan_ifname,
     int fd;
     int ret;
     int found = 0;
-    struct nlmsghdr *nlh;
-    struct nlattr *linkinfo, *info_data, *egress_qos, *nla;
+    const struct nlmsghdr *nlh;
+    const struct nlattr *linkinfo, *info_data, *egress_qos, *nla;
     const char *attr_data;
     int attr_len;
 
@@ -847,7 +851,7 @@ int snsd_dcb_get_egress_qos_map(const char *vlan_ifname,
     }
 
     /* Parse response: find IFLA_LINKINFO > IFLA_INFO_DATA > IFLA_VLAN_EGRESS_QOS */
-    nlh = (struct nlmsghdr *)resp_buf;
+    nlh = (const struct nlmsghdr *)resp_buf;
     attr_data = (const char *)NLMSG_DATA(nlh) + NLMSG_ALIGN(sizeof(struct ifinfomsg));
     attr_len = nlh->nlmsg_len - NLMSG_ALIGN(NLMSG_LENGTH(sizeof(struct ifinfomsg)));
 
@@ -884,23 +888,23 @@ int snsd_dcb_get_egress_qos_map(const char *vlan_ifname,
     attr_data = (const char *)egress_qos + NLA_HDRLEN;
     attr_len = egress_qos->nla_len - NLA_HDRLEN;
 
-    nla = (struct nlattr *)attr_data;
+    nla = (const struct nlattr *)attr_data;
     while (attr_len >= NLA_HDRLEN && found < SNSD_DCB_MAX_EGRESS_MAP) {
         if (nla->nla_len < NLA_HDRLEN || nla->nla_len > attr_len)
             break;
 
         if (nla->nla_type == IFLA_VLAN_QOS_MAPPING &&
             nla->nla_len >= NLA_HDRLEN + (int)sizeof(struct ifla_vlan_qos_mapping)) {
-            struct ifla_vlan_qos_mapping *qos;
+            const struct ifla_vlan_qos_mapping *qos;
 
-            qos = (struct ifla_vlan_qos_mapping *)((char *)nla + NLA_HDRLEN);
+            qos = (const struct ifla_vlan_qos_mapping *)((const char *)nla + NLA_HDRLEN);
             maps[found].from = (int)qos->from;
             maps[found].to = (int)qos->to;
             found++;
         }
 
         attr_len -= NLA_ALIGN(nla->nla_len);
-        nla = (struct nlattr *)((char *)nla + NLA_ALIGN(nla->nla_len));
+        nla = (const struct nlattr *)((const char *)nla + NLA_ALIGN(nla->nla_len));
     }
 
     *count = found;

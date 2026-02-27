@@ -282,7 +282,7 @@ static int snsd_network_parse_field(const char *field,
 static int snsd_network_parse_line(char *line)
 {
     struct snsd_network_cfg *cfg;
-    char *field;
+    const char *field;
     char *save_ptr = NULL;
     int ret;
 
