@@ -30,7 +30,7 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 #ifndef _SNSD_CFG_H
-#define _SNSD_CGF_H
+#define _SNSD_CFG_H
 
 #include "snsd.h"
 

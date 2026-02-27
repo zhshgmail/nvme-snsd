@@ -37,7 +37,6 @@
 #include "snsd_switch.h"
 #include "snsd_direct.h"
 #include "snsd_network.h"
-#include "snsd_cfg.h"
 
 struct usr_command {
     const char *cmd;
