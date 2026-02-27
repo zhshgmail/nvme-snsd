@@ -28,7 +28,9 @@ OBJS := $(SRC_PATH)/snsd_cfg.o		\
 		$(SRC_PATH)/snsd_direct.o	\
 		$(SRC_PATH)/snsd_connect.o	\
 		$(SRC_PATH)/snsd_conn_peon.o \
-		$(SRC_PATH)/snsd_conn_nvme.o 
+		$(SRC_PATH)/snsd_conn_nvme.o \
+		$(SRC_PATH)/snsd_dcb.o		\
+		$(SRC_PATH)/snsd_network.o
 
 UT_OBJS := snsd_ut.o \
 			snsd_connect_ut.o	\
@@ -36,7 +38,8 @@ UT_OBJS := snsd_ut.o \
 			snsd_mgt_ut.o \
 			snsd_server_ut.o \
 			snsd_switch_ut.o \
-			snsd_direct_ut.o
+			snsd_direct_ut.o \
+			snsd_network_ut.o
 
 $(UT_TEST): $(OBJS) $(UT_OBJS)
 		$(LINK) $(OBJS) $(UT_OBJS) $(LIBS) $(CFLAGS) -o $(UT_TEST)
