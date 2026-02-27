@@ -493,16 +493,16 @@ int snsd_network_init(void)
 
 int snsd_network_apply(void)
 {
+    struct list_head *pos;
     struct snsd_network_cfg *cfg;
-    int ret;
     int fail_count = 0;
 
     if (network_cfg_count == 0)
         return 0;
 
-    list_for_each_entry(cfg, &network_cfg_list, list) {
-        ret = snsd_network_apply_one(cfg);
-        if (ret != 0)
+    list_for_each(pos, &network_cfg_list) {
+        cfg = list_entry(pos, struct snsd_network_cfg, list);
+        if (snsd_network_apply_one(cfg) != 0)
             fail_count++;
     }
 
@@ -517,6 +517,7 @@ int snsd_network_apply(void)
 
 void snsd_network_check(void)
 {
+    struct list_head *pos;
     struct snsd_network_cfg *cfg;
 
     if (network_cfg_count == 0)
@@ -524,7 +525,8 @@ void snsd_network_check(void)
 
     SNSD_PRINT(SNSD_DBG, "Periodic QoS check running...");
 
-    list_for_each_entry(cfg, &network_cfg_list, list) {
+    list_for_each(pos, &network_cfg_list) {
+        cfg = list_entry(pos, struct snsd_network_cfg, list);
         snsd_network_check_one(cfg);
     }
 }
