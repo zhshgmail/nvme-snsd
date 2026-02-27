@@ -137,6 +137,12 @@ main()
    - R4: PFC 读取改用 `struct ieee_pfc` 指针 + payload 长度校验
    - 集成验证：PFC 下发/漂移修复（使用新 struct ieee_pfc 读取路径）、Trust、Egress 全部通过
 
+4. **静态分析合规** — ✅ 通过
+   - 工具：cppcheck 2.13.0、clang-tidy 18.1.3、flawfinder 2.0.19
+   - 修复：移除冗余条件判断、增加 `const` 指针限定符（只读解析路径）
+   - 剩余：`variableScope` 风格建议（保持项目现有代码风格，声明在函数顶部）
+   - flawfinder 仅报告 Level 2（通用缓冲区/fopen 提示，均为项目既有代码且使用安全）
+
 ### 5.2 短期
 
 3. **Trust 漂移检测测试**
